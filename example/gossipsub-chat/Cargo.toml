@@ -1,0 +1,13 @@
+[package]
+name = "gossipsub-chat"
+version = "0.1.0"
+authors = ["costa-wang <3162284013@qq.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+futures = { version = "0.3.4", features = ["executor", "thread-pool"] }
+libp2p = { version = "0.19.0" }
+env_logger = { version = "0.7.1" }
+async-std = { version = "1.5.0" }

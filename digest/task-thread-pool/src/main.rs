@@ -1,6 +1,16 @@
-use futures::{prelude::*, channel::mpsc, stream::{self,FuturesUnordered}};
-use std::{fmt,pin::Pin, task::Context, task::Poll};
+use futures::{
+    prelude::*, 
+    executor::{self as exec,ThreadPool, ThreadPoolBuilder},
+    channel::mpsc, 
+    stream::{self,FuturesUnordered}
+};
+use std::{
+    fmt,
+    pin::Pin, 
+    task::{ Context,Poll}
+};
 use fnv::FnvHashMap;
+
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TaskId(pub usize);
@@ -14,55 +24,54 @@ pub enum Command<T> {
 
 /// Events that a task can emit to its manager.
 #[derive(Debug)]
-pub enum Event<T, H> {
+pub enum Event {
     /// A connection to a node has succeeded.
     Established { id: TaskId },
     /// An established connection produced an error.
     Error { id: TaskId },
     /// A pending connection failed.
-    Failed { id: TaskId, handler: H },
+    Failed { id: TaskId },
     /// Notify the manager of an event from the connection.
-    Notify { id: TaskId, event: T }
+    Notify { id: TaskId }
 }
 
 
 
 /// The state associated with the `Task` of a connection.
 
-impl<T, H> Event<T, H> {
+impl Event {
     pub fn id(&self) -> &TaskId {
         match self {
-            Event::Established { id, .. } => id,
-            Event::Error { id, .. } => id,
-            Event::Notify { id, .. } => id,
-            Event::Failed { id, .. } => id,
+            Event::Established { id } => id,
+            Event::Error { id } => id,
+            Event::Notify { id } => id,
+            Event::Failed { id } => id,
         }
     }
 }
 
-pub struct Task<H, T, I, F>
+pub struct Task<I, F>
 {
     /// The ID of this task.
     id: TaskId,
 
     /// Sender to emit events to the manager of this task.
-    events: mpsc::Sender<Event<T, H>>,
+    events: mpsc::Sender<Event>,
 
     /// Receiver for commands sent by the manager of this task.
     commands: stream::Fuse<mpsc::Receiver<Command<I>>>,
 
     /// Inner state of this `Task`.
-    state: State<T, H, F>,
+    state: State<F>,
 }
 
-impl<H, T, I, F> Task<H, T, I,F>
+impl<I, F> Task<I,F>
 {
     pub fn pending(
         id: TaskId,
-        events: mpsc::Sender<Event<T,H>>,
+        events: mpsc::Sender<Event>,
         commands: mpsc::Receiver<Command<I>>,
         future: F,
-        handler: H
     ) -> Self {
         Task {
             id,
@@ -70,34 +79,32 @@ impl<H, T, I, F> Task<H, T, I,F>
             commands: commands.fuse(),
             state: State::Pending {
                 future: Box::pin(future),
-                handler,
             },
         }
     }
 }
 
 
-enum State<T, H, F>
+enum State<F>
 {   
     Pending {
         /// The intended handler for the established connection.
-        future:Pin<Box<F>>,
-        handler: H,
+        future:Pin<Box<F>>
     },
     Ready {
         /// The actual event message to send.
-        event: Event<T, H>
+        event: Event
     },
     /// The task has finished.
     Done
 }
 
-impl<H, T, I, F> Unpin for Task<H, T, I, F>
+impl<I, F> Unpin for Task<I, F>
 {
 }
 
 
-impl<H, T, I, F> Future for Task<H, T, I, F>
+impl<I, F> Future for Task<I, F>
 {
     type Output = ();
 
@@ -110,7 +117,7 @@ impl<H, T, I, F> Future for Task<H, T, I, F>
 
         'poll: loop {
             match std::mem::replace(&mut this.state, State::Done) {
-                State::Pending { mut future, handler } => {
+                State::Pending { mut future } => {
                     // Check if the manager aborted this task by dropping the `commands`
                     // channel sender side.
                     match Stream::poll_next(Pin::new(&mut this.commands), cx) {
@@ -191,7 +198,7 @@ impl<T: ?Sized + Executor> Executor for Box<T> {
 
 
 /// A connection `Manager` orchestrates the I/O of a set of connections.
-pub struct Manager<T, H, I> {
+pub struct Manager<I> {
     /// The tasks of the managed connections.
     ///
     /// Each managed connection is associated with a (background) task
@@ -215,13 +222,13 @@ pub struct Manager<T, H, I> {
 
     /// Sender distributed to managed tasks for reporting events back
     /// to the manager.
-    events_tx: mpsc::Sender<Event<T, H>>,
+    events_tx: mpsc::Sender<Event>,
 
     /// Receiver for events reported from managed tasks.
-    events_rx: mpsc::Receiver<Event<T, H>>
+    events_rx: mpsc::Receiver<Event>
 }
 
-impl<T, H, I> fmt::Debug for Manager<T, H, I>
+impl<I> fmt::Debug for Manager<I>
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_map()
@@ -230,7 +237,7 @@ impl<T, H, I> fmt::Debug for Manager<T, H, I>
     }
 }
 
-impl<T, H, I> Manager<T, H, I> {
+impl<I> Manager<I> {
     /// Creates a new connection manager.
     pub fn new(executor: Option<Box<dyn Executor + Send>>) -> Self {
         let (tx, rx) = mpsc::channel(1);
@@ -248,9 +255,8 @@ impl<T, H, I> Manager<T, H, I> {
     ///
     /// This method spawns a task dedicated to resolving this future and
     /// processing the node's events.
-    pub fn add_pending<F>(&mut self, future: F, handler: H)
-    where H: Send + 'static,
-    T: Send + 'static,
+    pub fn add_pending<F>(&mut self, future: F)
+    where 
     I: Send + 'static,
     F: Future<Output = ()> + Send + 'static,
     {
@@ -260,12 +266,15 @@ impl<T, H, I> Manager<T, H, I> {
         let (tx, rx) = mpsc::channel(4);
         self.tasks.insert(task_id, TaskInfo { sender: tx, state: TaskState::Pending });
 
-        let task = Box::pin(Task::<H, T, I, F>::pending(task_id, self.events_tx.clone(), rx, future, handler));
+        let task = Box::pin(Task::<I, F>::pending(task_id, self.events_tx.clone(), rx, future));
         if let Some(executor) = &mut self.executor {
+            print!("{}",1.to_string());
             executor.exec(task);
-        } else {
-            self.local_spawns.push(task);
-        }
+        } 
+        // else {
+        //     print!("{}",2.to_string());
+        //     self.local_spawns.push(task);
+        // }
     }
 }
 
@@ -292,5 +301,32 @@ enum TaskState {
 
 
 fn main() {
-    println!("Hello, world!");
+    // println!("Hello, world!");
+    struct PoolWrapper(ThreadPool);
+    impl Executor for PoolWrapper {
+    fn exec(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) {
+                    self.0.spawn_ok(f)
+    }
+    }
+
+    match ThreadPoolBuilder::new()
+    .name_prefix("task-")
+    .create()
+    .map(|tp| Box::new(PoolWrapper(tp)) as Box<_>)
+    {
+    Ok(executor) => { 
+       let mut manager = Manager::<usize>::new(Some(Box::new(executor)));
+    //    manager.add_pending(async move {
+    //     println!("Hello from task");
+    // });
+    exec::block_on(
+        async move {
+            println!("Hello from task");
+        }
+    );
+    },
+    Err(err) => {
+        
+    }
+    }
 }
