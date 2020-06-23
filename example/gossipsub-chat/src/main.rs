@@ -35,8 +35,13 @@
 //! cargo run 
 //! ```
 //!
-//! It will print the PeerId and the listening address, e.g. `Listening on
-//! "/ip4/127.0.0.1/tcp/*****"`
+//! It will print the PeerId and the listening address, e.g. 
+//! Local peer id: PeerId("12D3KooWEB6WxGpgtdEyVjV4HFjTZ5VXay6FTfXvyzEV6JVWYcYy")
+//! [2020-05-19T07:34:42Z INFO  libp2p_gossipsub::behaviour] Subscribed to topic: test-net
+//! Listening on "/ip4/192.168.215.1/tcp/*****"
+//! Listening on "/ip4/192.168.207.1/tcp/*****"
+//! Listening on "/ip6/::1/tcp/*****"
+//! Listening on "/ip4/127.0.0.1/tcp/*****"
 //!
 //! In the second terminal window, start a new instance of the example with:
 //!
@@ -73,6 +78,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Create a Gossipsub topic
     let topic = Topic::new("test-net".into());
+    //const PUBSUB_TOPICS: [&str; 2] = ["/fil/blocks", "/fil/msgs"];
 
     // Create a Swarm to manage peers and events
     let mut swarm = {
